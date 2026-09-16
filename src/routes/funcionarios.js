@@ -1,0 +1,11 @@
+const express=require('express');
+const bcrypt=require('bcryptjs');
+const pool=require('../db/pool');
+const {auth,managerOnly}=require('../middleware/auth');
+const router=express.Router();
+router.use(auth,managerOnly);
+router.get('/',async(req,res,next)=>{try{const [r]=await pool.query('SELECT id,nome,login,perfil,ativo,created_at FROM funcionarios ORDER BY nome');res.json(r)}catch(e){next(e)}});
+router.post('/',async(req,res,next)=>{try{const {nome,login,senha,perfil='FUNCIONARIO'}=req.body;if(!nome||!login||!senha||!['GERENTE','FUNCIONARIO'].includes(perfil))return res.status(400).json({error:'Preencha os campos obrigatórios.'});const hash=await bcrypt.hash(senha,10);const [r]=await pool.query('INSERT INTO funcionarios(nome,login,senha,perfil) VALUES(?,?,?,?)',[nome,login,hash,perfil]);res.status(201).json({id:r.insertId,nome,login,perfil})}catch(e){if(e.code==='ER_DUP_ENTRY')return res.status(409).json({error:'Login já cadastrado.'});next(e)}});
+router.put('/:id',async(req,res,next)=>{try{const {id}=req.params;const {nome,login,senha,perfil,ativo}=req.body;if(!nome||!login||!['GERENTE','FUNCIONARIO'].includes(perfil))return res.status(400).json({error:'Dados obrigatórios inválidos.'});let sql='UPDATE funcionarios SET nome=?,login=?,perfil=?,ativo=?';let args=[nome,login,perfil,ativo===false?0:1];if(senha){sql+=',senha=?';args.push(await bcrypt.hash(senha,10))}sql+=' WHERE id=?';args.push(id);const [r]=await pool.query(sql,args);if(!r.affectedRows)return res.status(404).json({error:'Funcionário não encontrado.'});res.json({message:'Funcionário atualizado.'})}catch(e){if(e.code==='ER_DUP_ENTRY')return res.status(409).json({error:'Login já cadastrado.'});next(e)}});
+router.delete('/:id',async(req,res,next)=>{try{if(Number(req.params.id)===req.user.id)return res.status(400).json({error:'Não é permitido excluir o próprio usuário logado.'});const [r]=await pool.query('DELETE FROM funcionarios WHERE id=?',[req.params.id]);if(!r.affectedRows)return res.status(404).json({error:'Funcionário não encontrado.'});res.json({message:'Funcionário excluído.'})}catch(e){if(e.code==='ER_ROW_IS_REFERENCED_2')return res.status(409).json({error:'Funcionário possui movimentações e não pode ser excluído.'});next(e)}});
+module.exports=router;

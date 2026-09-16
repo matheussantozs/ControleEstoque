@@ -1,0 +1,2 @@
+const bcrypt=require('bcryptjs');const pool=require('./db/pool');
+(async()=>{try{const [r]=await pool.query("SELECT id FROM funcionarios WHERE login='admin'");if(!r.length){const hash=await bcrypt.hash('admin123',10);await pool.query("INSERT INTO funcionarios(nome,login,senha,perfil) VALUES(?,?,?,'GERENTE')",['Administrador','admin',hash]);console.log('Usuário admin criado.')}else console.log('Usuário admin já existe.')}catch(e){console.error('Seed:',e.message)}finally{await pool.end()}})();
