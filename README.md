@@ -1,5 +1,5 @@
 # Estoque Fácil — Sistema de Gerenciamento de Estoque
-
+teste
 Projeto baseado no documento de requisitos do sistema de gerenciamento de estoque do IFAL.
 
 ## Tecnologias
