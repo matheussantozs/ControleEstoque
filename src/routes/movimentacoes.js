@@ -1,6 +1,77 @@
-const express=require('express');
-const pool=require('../db/pool');
-const {auth}=require('../middleware/auth');
-const router=express.Router();router.use(auth);
-router.post('/',async(req,res,next)=>{const conn=await pool.getConnection();try{const {produto_id,tipo,quantidade,observacao=''}=req.body;const qtd=Number(quantidade);if(!produto_id||!['ENTRADA','SAIDA'].includes(tipo)||!Number.isInteger(qtd)||qtd<=0)return res.status(400).json({error:'Produto, tipo e quantidade válida são obrigatórios.'});await conn.beginTransaction();const [p]=await conn.query('SELECT id,quantidade FROM produtos WHERE id=? FOR UPDATE',[produto_id]);if(!p[0]){await conn.rollback();return res.status(404).json({error:'Produto não encontrado.'})}const atual=p[0].quantidade;const nova=tipo==='ENTRADA'?atual+qtd:atual-qtd;if(nova<0){await conn.rollback();return res.status(400).json({error:'Quantidade solicitada superior ao estoque disponível.'})}await conn.query('UPDATE produtos SET quantidade=? WHERE id=?',[nova,produto_id]);await conn.query('INSERT INTO movimentacoes(produto_id,funcionario_id,tipo,quantidade,observacao) VALUES(?,?,?,?,?)',[produto_id,req.user.id,tipo,qtd,observacao]);await conn.commit();res.status(201).json({message:`${tipo==='ENTRADA'?'Entrada':'Saída'} registrada.`,quantidade:nova})}catch(e){await conn.rollback();next(e)}finally{conn.release()}});
-router.get('/',async(req,res,next)=>{try{const {inicio,fim,tipo,produto_id}=req.query;let sql=`SELECT m.id,m.tipo,m.quantidade,m.observacao,m.created_at,p.codigo,p.nome produto,f.nome funcionario FROM movimentacoes m JOIN produtos p ON p.id=m.produto_id JOIN funcionarios f ON f.id=m.funcionario_id WHERE 1=1`;const a=[];if(inicio){sql+=' AND DATE(m.created_at)>=?';a.push(inicio)}if(fim){sql+=' AND DATE(m.created_at)<=?';a.push(fim)}if(tipo){sql+=' AND m.tipo=?';a.push(tipo)}if(produto_id){sql+=' AND m.produto_id=?';a.push(produto_id)}sql+=' ORDER BY m.created_at DESC';const [r]=await pool.query(sql,a);res.json(r)}catch(e){next(e)}});module.exports=router;
+const express = require('express');
+const pool = require('../db/pool');
+const { auth } = require('../middleware/auth');
+const { positiveInt, text, validDate } = require('../utils');
+const router = express.Router();
+router.use(auth);
+
+router.post('/', async (req, res, next) => {
+    const conn = await pool.getConnection();
+    try {
+        const produtoId = positiveInt(req.body?.produto_id);
+        const tipo = req.body?.tipo;
+        const quantidade = positiveInt(req.body?.quantidade);
+        const observacao = req.body?.observacao ? text(req.body.observacao, { min: 1, max: 255 }) : null;
+        if (!produtoId || !['ENTRADA', 'SAIDA'].includes(tipo) || !quantidade || (req.body?.observacao && !observacao)) {
+            return res.status(400).json({ error: 'Produto, tipo e quantidade válida são obrigatórios.' });
+        }
+
+        await conn.beginTransaction();
+        const [products] = await conn.execute(
+            'SELECT id,quantidade,ativo FROM produtos WHERE id=? FOR UPDATE',
+            [produtoId],
+        );
+        const product = products[0];
+        if (!product || !product.ativo) {
+            await conn.rollback();
+            return res.status(404).json({ error: 'Produto não encontrado ou inativo.' });
+        }
+        const atual = Number(product.quantidade);
+        if (tipo === 'SAIDA' && quantidade > atual) {
+            await conn.rollback();
+            return res.status(409).json({ error: `Estoque insuficiente. Disponível: ${atual}.` });
+        }
+        const nova = tipo === 'ENTRADA' ? atual + quantidade : atual - quantidade;
+        await conn.execute('UPDATE produtos SET quantidade=? WHERE id=?', [nova, produtoId]);
+        await conn.execute(
+            `INSERT INTO movimentacoes(produto_id,funcionario_id,tipo,quantidade,observacao)
+             VALUES(?,?,?,?,?)`,
+            [produtoId, req.user.id, tipo, quantidade, observacao],
+        );
+        await conn.commit();
+        res.status(201).json({ message: `${tipo === 'ENTRADA' ? 'Entrada' : 'Saída'} registrada.`, quantidade: nova });
+    } catch (e) {
+        await conn.rollback();
+        next(e);
+    } finally { conn.release(); }
+});
+
+router.get('/', async (req, res, next) => {
+    try {
+        const inicio = req.query.inicio || null;
+        const fim = req.query.fim || null;
+        const tipo = req.query.tipo || null;
+        const produtoId = req.query.produto_id ? positiveInt(req.query.produto_id) : null;
+        if (inicio && !validDate(inicio)) return res.status(400).json({ error: 'Data inicial inválida.' });
+        if (fim && !validDate(fim)) return res.status(400).json({ error: 'Data final inválida.' });
+        if (inicio && fim && inicio > fim) return res.status(400).json({ error: 'Período inválido.' });
+        if (tipo && !['ENTRADA', 'SAIDA'].includes(tipo)) return res.status(400).json({ error: 'Tipo inválido.' });
+        if (req.query.produto_id && !produtoId) return res.status(400).json({ error: 'Produto inválido.' });
+
+        let sql = `SELECT m.id,m.tipo,m.quantidade,m.observacao,m.created_at,
+                          m.venda_id,p.codigo,p.nome AS produto,f.nome AS funcionario
+                   FROM movimentacoes m
+                   JOIN produtos p ON p.id=m.produto_id
+                   JOIN funcionarios f ON f.id=m.funcionario_id WHERE 1=1`;
+        const args = [];
+        if (inicio) { sql += ' AND m.created_at >= ?'; args.push(`${inicio} 00:00:00`); }
+        if (fim) { sql += ' AND m.created_at < DATE_ADD(?, INTERVAL 1 DAY)'; args.push(`${fim} 00:00:00`); }
+        if (tipo) { sql += ' AND m.tipo=?'; args.push(tipo); }
+        if (produtoId) { sql += ' AND m.produto_id=?'; args.push(produtoId); }
+        sql += ' ORDER BY m.created_at DESC, m.id DESC LIMIT 1000';
+        const [rows] = await pool.execute(sql, args);
+        res.json(rows);
+    } catch (e) { next(e); }
+});
+
+module.exports = router;
